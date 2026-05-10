@@ -24,6 +24,64 @@ except Exception:
 
 
 # =============================================================================
+# Helper for loading NAF upsampler
+# =============================================================================
+
+def _load_naf_upsampler():
+    """
+    Robustly load the NAF upsampler, handling potential 'src' module conflicts.
+    """
+    import os
+    import sys
+    import torch
+
+    try:
+        # First try the standard way
+        return torch.hub.load("valeoai/NAF", "naf", pretrained=True)
+    except Exception as e:
+        error_str = str(e)
+        if "src.model" not in error_str and "No module named 'src'" not in error_str:
+            raise e
+            
+        # If it failed with a module error related to 'src', try the fix
+        hub_dir = torch.hub.get_dir()
+        repo_dir = os.path.join(hub_dir, "valeoai_NAF_main")
+        
+        if not os.path.exists(repo_dir):
+            # Try to force download if it doesn't exist for some reason
+            # but usually it should be there if we got this far
+            raise e
+            
+        src_dir = os.path.join(repo_dir, "src")
+        if os.path.isdir(src_dir):
+            init_py = os.path.join(src_dir, "__init__.py")
+            if not os.path.exists(init_py):
+                try:
+                    with open(init_py, "w") as f:
+                        pass
+                except Exception:
+                    pass
+        
+        # Force the path and clear sys.modules['src']
+        orig_path = sys.path.copy()
+        if repo_dir not in sys.path:
+            sys.path.insert(0, repo_dir)
+        
+        old_src = sys.modules.pop("src", None)
+        # Also remove potential submodules
+        old_src_model = sys.modules.pop("src.model", None)
+        
+        try:
+            return torch.hub.load("valeoai/NAF", "naf", pretrained=True)
+        finally:
+            sys.path = orig_path
+            if old_src:
+                sys.modules["src"] = old_src
+            if old_src_model:
+                sys.modules["src.model"] = old_src_model
+
+
+# =============================================================================
 # Base DINOv2 Encoder
 # =============================================================================
 
@@ -410,7 +468,7 @@ class DinoEncoderProj(BaseModule, ModelMixin):
 
         # Optional: load upsampler
         if self.use_upsample:
-            upsampler = torch.hub.load("valeoai/NAF", "naf", pretrained=True)
+            upsampler = _load_naf_upsampler()
             self.upsampler = upsampler.eval()
 
         # Image preprocessing (normalization only)
@@ -583,7 +641,7 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
 
         # Optional: upsampler
         if self.use_upsample:
-            upsampler = torch.hub.load("valeoai/NAF", "naf", pretrained=True)
+            upsampler = _load_naf_upsampler()
             self.upsampler = upsampler.eval()
 
         # Image preprocessing
