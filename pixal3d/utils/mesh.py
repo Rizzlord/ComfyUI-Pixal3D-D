@@ -9,7 +9,9 @@ def compute_valid_udf(vertices, faces, dim=512, threshold=8.0):
     udf = torch.zeros(dim**3,device=vertices.device).int() + 10000000
     n_faces = faces.shape[0]
     udf_ext.compute_valid_udf(vertices, faces, udf, n_faces, dim, threshold)
-    return udf.float()/10000000.
+    res = udf.float()
+    del udf
+    return res / 10000000.
 
 def normalize_mesh(mesh, scale=0.95):
     vertices = mesh.vertices
@@ -26,9 +28,11 @@ def mesh2index(mesh, size=1024, factor=8):
     vertices = torch.Tensor(mesh.vertices).float().cuda() * 0.5
     faces = torch.Tensor(mesh.faces).int().cuda()
     sdf = compute_valid_udf(vertices, faces, dim=size, threshold=4.0)
+    del vertices, faces
     sdf = sdf.reshape(size, size, size).unsqueeze(0)
 
     sparse_index = (sdf < 4/size).nonzero()
+    del sdf
     sparse_index[..., 1:] = sparse_index[..., 1:] // factor
     latent_index = torch.unique(sparse_index, dim=0)
     return latent_index

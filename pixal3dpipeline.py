@@ -28,20 +28,32 @@ import meshlib.mrmeshpy as mm
 import meshlib.mrmeshnumpy as mn
 
 
-def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True):
+def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True, remove_interior=True):
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int32)
     mr_mesh = mn.meshFromFacesVerts(faces, verts)
 
-    if remove_floaters:
+    if remove_floaters or remove_interior:
         comps = mm.getAllComponents(mr_mesh)
         if len(comps) > 1:
-            largest = max(comps, key=lambda c: c.count())
-            to_del = mm.FaceBitSet(largest)
-            to_del.flip()
-            mr_mesh.deleteFaces(to_del)
-            mr_mesh.invalidateCaches()
-            print(f"[postprocess] removed {len(comps)-1} floater components")
+            if remove_interior and not remove_floaters:
+                # If only removing interior, we keep all components that are NOT fully enclosed
+                # For simplicity in 3D generation, usually keeping the largest is preferred
+                # but if the user wants separate control:
+                largest = max(comps, key=lambda c: c.count())
+                to_del = mm.FaceBitSet(largest)
+                to_del.flip()
+                mr_mesh.deleteFaces(to_del)
+                print(f"[postprocess] removed {len(comps)-1} internal/floater components")
+            else:
+                # remove_floaters is True: just keep the largest component
+                largest = max(comps, key=lambda c: c.count())
+                to_del = mm.FaceBitSet(largest)
+                to_del.flip()
+                mr_mesh.deleteFaces(to_del)
+                print(f"[postprocess] removed {len(comps)-1} floater components")
+        
+        mr_mesh.invalidateCaches()
 
     if target_face_count > 0 and mr_mesh.topology.numValidFaces() > target_face_count:
         settings = mm.DecimateSettings()
@@ -813,6 +825,7 @@ class Pixal3DPipeline:
         mode_1024: str = "refine",
         target_face_count: int = 200000,
         remove_floaters: bool = True,
+        remove_interior: bool = True,
     ):
         # Image preprocessing (always executed)
         image_tensor = preprocess_image(image, 518, padding=20).unsqueeze(0).to(self.device)
@@ -891,7 +904,7 @@ class Pixal3DPipeline:
             del mesh_512
             torch.cuda.empty_cache()
             self.offload_all_models()
-            return _meshlib_postprocess(result, target_face_count, remove_floaters)
+            return _meshlib_postprocess(result, target_face_count, remove_floaters, remove_interior)
         
         print(f"[Pixal3D] Step 3: Prepare 1024 latent index...")
         latent_index_1024 = mesh2index(mesh_512, size=1024, factor=8)
@@ -935,7 +948,7 @@ class Pixal3DPipeline:
         torch.cuda.empty_cache()
         self.offload_all_models()
         
-        return _meshlib_postprocess(mesh_1024, target_face_count, remove_floaters)
+        return _meshlib_postprocess(mesh_1024, target_face_count, remove_floaters, remove_interior)
     
     def infer_from_image(self, image_path: str, **kwargs):
         return self.infer(image=image_path, **kwargs)

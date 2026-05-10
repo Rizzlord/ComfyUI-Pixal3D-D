@@ -110,6 +110,10 @@ class Pixal3DGenerateDense:
             "mesh_scale": mesh_scale
         }
         
+        pipeline._offload_stage("dense")
+        gc.collect()
+        torch.cuda.empty_cache()
+        
         return (ctx, mesh_scale)
 
 class Pixal3DRefineSparse:
@@ -125,7 +129,8 @@ class Pixal3DRefineSparse:
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "tooltip": "Classifier-free guidance scale"}),
                 "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "tooltip": "Marching cubes threshold for final mesh extraction"}),
                 "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 1000000, "tooltip": "Target number of faces for decimation (0 to skip)"}),
-                "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove interior components and floaters using meshlib"}),
+                "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
+                "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal shells and fully enclosed geometry"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffff}),
             },
         }
@@ -135,9 +140,10 @@ class Pixal3DRefineSparse:
     CATEGORY = "Pixal3D-D"
 
     def generate(self, pipeline, latent_index, mode_1024, sparse_512_steps, sparse_1024_steps, 
-                 guidance_scale, mc_threshold, target_face_count, remove_interior, seed):
+                 guidance_scale, mc_threshold, target_face_count, remove_floaters, remove_interior, seed):
         
         ctx = latent_index
+        pipeline._offload_stage("dense") # Ensure dense is gone
         index = ctx["index"].to(pipeline.device)
         image_tensor = ctx["image_tensor"].to(pipeline.device)
         camera_angle_x = ctx["camera_angle_x"]
@@ -175,7 +181,7 @@ class Pixal3DRefineSparse:
                 mm.soft_empty_cache()
             else:
                 pipeline.offload_all_models()
-            return (_meshlib_postprocess(res, target_face_count, remove_interior),)
+            return (_meshlib_postprocess(res, target_face_count, remove_floaters, remove_interior),)
 
         latent_index_1024 = mesh2index(mesh_512, size=1024, factor=8).to(pipeline.device)
         del mesh_512
@@ -208,7 +214,7 @@ class Pixal3DRefineSparse:
             mm.soft_empty_cache()
         else:
             pipeline.offload_all_models()
-        return (_meshlib_postprocess(res, target_face_count, remove_interior),)
+        return (_meshlib_postprocess(res, target_face_count, remove_floaters, remove_interior),)
 
 class Pixal3DRefineMesh:
     @classmethod
@@ -223,6 +229,7 @@ class Pixal3DRefineMesh:
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0}),
                 "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
                 "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 1000000}),
+                "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
                 "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal geometry using meshlib"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffff}),
             },
@@ -233,8 +240,9 @@ class Pixal3DRefineMesh:
     CATEGORY = "Pixal3D-D"
 
     def generate(self, pipeline, image, mesh, mode_1024, steps, guidance_scale, 
-                 mc_threshold, target_face_count, remove_interior, seed):
+                 mc_threshold, target_face_count, remove_floaters, remove_interior, seed):
         
+        pipeline._offload_stage("dense")
         i = 255. * image[0].cpu().numpy()
         img = Image.fromarray(np.clip(i, 0, 255).astype(np.uint8))
         image_tensor = preprocess_image(img, 518, padding=20).unsqueeze(0).to(pipeline.device)
@@ -287,7 +295,7 @@ class Pixal3DRefineMesh:
             mm.soft_empty_cache()
         else:
             pipeline.offload_all_models()
-        return (_meshlib_postprocess(res, target_face_count, remove_interior),)
+        return (_meshlib_postprocess(res, target_face_count, remove_floaters, remove_interior),)
 
 NODE_CLASS_MAPPINGS = {
     "Pixal3DLoader": Pixal3DLoader,

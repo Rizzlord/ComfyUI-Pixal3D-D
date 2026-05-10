@@ -477,6 +477,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         mode_1024: str = "refine",
         target_face_count: int = 200000,
         remove_floaters: bool = True,
+        remove_interior: bool = True,
     ):
         # Image preprocessing
         image_tensor = preprocess_image(image, 518, padding=20).unsqueeze(0).to(self.device)
@@ -582,7 +583,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
             del mesh_512
             torch.cuda.empty_cache()
             self.offload_all_models()
-            return _meshlib_postprocess(result, target_face_count, remove_floaters)
+            return _meshlib_postprocess(result, target_face_count, remove_floaters, remove_interior)
 
         print(f"[Pixal3D-2Stage] Step 3: Prepare 1024 latent index...")
         latent_index_1024 = mesh2index(mesh_512, size=1024, factor=8)
@@ -626,7 +627,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         torch.cuda.empty_cache()
         self.offload_all_models()
 
-        return _meshlib_postprocess(mesh_1024, target_face_count, remove_floaters)
+        return _meshlib_postprocess(mesh_1024, target_face_count, remove_floaters, remove_interior)
 
     def infer_from_image(self, image_path: str, **kwargs):
         return self.infer(image=image_path, **kwargs)
