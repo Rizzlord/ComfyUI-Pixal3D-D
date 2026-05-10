@@ -16,26 +16,8 @@ from pixal3d.utils import sort_block, mesh2index, normalize_mesh
 class Pixal3DLoader:
     @classmethod
     def INPUT_TYPES(s):
-        model_base = os.path.join(folder_paths.models_dir, "pixal3d-d")
-        if not os.path.exists(model_base):
-            os.makedirs(model_base, exist_ok=True)
-        
-        model_roots = []
-        if os.path.exists(os.path.join(model_base, "dense")):
-            model_roots.append(".")
-        
-        for f in sorted(os.listdir(model_base)):
-            full_path = os.path.join(model_base, f)
-            if os.path.isdir(full_path):
-                if os.path.exists(os.path.join(full_path, "dense")):
-                    model_roots.append(f)
-        
-        if not model_roots:
-            model_roots = ["."]
-        
         return {
             "required": {
-                "ckpt_folder": (model_roots, {"default": model_roots[0], "tooltip": "Select the Pixal3D-D model folder inside models/pixal3d-d"}),
                 "keep_model_loaded": ("BOOLEAN", {"default": True, "tooltip": "If False, the model will be moved to CPU and VRAM cleared after generation"}),
             },
         }
@@ -45,10 +27,11 @@ class Pixal3DLoader:
     FUNCTION = "load_model"
     CATEGORY = "Pixal3D-D"
 
-    def load_model(self, ckpt_folder, keep_model_loaded):
+    def load_model(self, keep_model_loaded):
         ckpt_path = os.path.join(folder_paths.models_dir, "pixal3d-d")
-        if ckpt_folder != ".":
-            ckpt_path = os.path.join(ckpt_path, ckpt_folder)
+        
+        if not os.path.exists(os.path.join(ckpt_path, "dense")):
+            raise FileNotFoundError(f"Pixal3D-D models not found in {ckpt_path}. Please ensure 'dense', 'sparse512', and 'sparse1024' folders are present.")
             
         device = mm.get_torch_device()
         pipeline = Pixal3DPipeline2Stage.from_pretrained(

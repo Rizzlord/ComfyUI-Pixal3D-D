@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.lib/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+
+# ComfyUI Models (Ignore weights but keep source code)
+pixal3d/models/Pixal3D-D/
+pixal3d/moge/checkpoints/
+*.safetensors
+*.pth
+*.bin
+*.ckpt
+*.pt
+
+# Temporary files
+temp/
+*.tmp
+.DS_Store
