@@ -237,17 +237,19 @@ def get_block_score(
         else:
             compressed_block_coords_b[:, 1:] = compressed_block_coords_b[:, 1:] // (block_size//kernel_stride)
             compressed_block_coords_flatten_b = compressed_block_coords_b[:, 1] * block_res**2 + compressed_block_coords_b[:, 2] * block_res + compressed_block_coords_b[:, 3]
+            compressed_block_coords_flatten_unique_b, compressed_block_coords_inverse_b = compressed_block_coords_flatten_b.unique(return_inverse=True)
+            num_unique_blocks = len(compressed_block_coords_flatten_unique_b)
             score_block_b = torch.scatter_reduce(
-                torch.zeros((num_kv_head, q_len, block_res**3), device=attn_score_b.device, dtype=attn_score_b.dtype),
-                index=compressed_block_coords_flatten_b.long().unsqueeze(0).unsqueeze(0).expand_as(attn_score_b),
+                torch.zeros((num_kv_head, q_len, num_unique_blocks), device=attn_score_b.device, dtype=attn_score_b.dtype),
+                index=compressed_block_coords_inverse_b.long().unsqueeze(0).unsqueeze(0).expand_as(attn_score_b),
                 src=attn_score_b,
                 reduce="sum",
                 dim=2,
             )
-            compressed_block_coords_flatten_unique_b = compressed_block_coords_flatten_b.unique()
-            score_block_b = score_block_b[..., compressed_block_coords_flatten_unique_b]
-            real_topk = min(topk, len(compressed_block_coords_flatten_unique_b))
-            block_topk_b = score_block_b.topk(real_topk, dim=-1).indices.sort(-1).values
+            real_topk = min(topk, num_unique_blocks)
+            topk_indices = score_block_b.topk(real_topk, dim=-1).indices
+            # Map back to original flattened grid indices
+            block_topk_b = compressed_block_coords_flatten_unique_b[topk_indices].sort(-1).values
             block_topk[:, q_start: q_end, :real_topk] = block_topk_b
 
         block_coords_b = q_coords[q_start: q_end]
