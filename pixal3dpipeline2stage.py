@@ -326,6 +326,14 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         do_cfg = guidance_scale > 0
         image = image.to(torch.float16)
 
+        # Offload DiT and VAE to save VRAM for the visual condition / NAF upsampler!
+        if self.dense_check_denoiser_model is not None:
+            self.dense_check_denoiser_model.to("cpu")
+        if getattr(self, "dense_vae", None) is not None:
+            self.dense_vae.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Encode conditions using dense_check visual condition
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=self.dense_dtype):
@@ -339,6 +347,12 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         uncond_proj = torch.zeros_like(cond_proj)
         cond = (cond_global, cond_proj)
         uncond = (uncond_global, uncond_proj)
+
+        # Bring DiT and VAE back to GPU
+        if self.dense_check_denoiser_model is not None:
+            self.dense_check_denoiser_model.to(self.device)
+        if getattr(self, "dense_vae", None) is not None:
+            self.dense_vae.to(self.device)
 
         # Initialize latents
         latent_shape = (batch_size, *self.dense_check_denoiser_model.dit_model.latent_shape)

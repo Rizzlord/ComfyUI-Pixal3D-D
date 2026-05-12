@@ -452,6 +452,7 @@ class DinoEncoderProj(BaseModule, ModelMixin):
         grid_resolution: int = 16
         use_upsample: bool = False
         use_geo_feats: bool = False
+        upsample_res: int = 518
 
     cfg: Config
 
@@ -488,6 +489,9 @@ class DinoEncoderProj(BaseModule, ModelMixin):
 
     def set_low_vram_mode(self, enabled: bool) -> None:
         self.low_vram = bool(enabled)
+        
+    def set_upsample_res(self, res: int) -> None:
+        self.cfg.upsample_res = int(res)
 
 
      
@@ -543,14 +547,28 @@ class DinoEncoderProj(BaseModule, ModelMixin):
             # Optional: upsample and fuse
             if self.use_upsample and not self.low_vram:
                 z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2)
+                upsample_res = getattr(self.cfg, "upsample_res", 518)
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 try:
+                    # Offload DINOv2 encoder to CPU temporarily to save ~1.2GB VRAM
+                    self.encoder.to('cpu')
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    
+                    upsample_image = image
+                    if upsample_res < 518:
+                        upsample_image = F.interpolate(image, size=(upsample_res, upsample_res), mode='bilinear', align_corners=False)
+                    print(f"[DinoEncoderProj] Attempting NAF upsampler at resolution {upsample_res}x{upsample_res}...")
                     z_upsampled = self.upsampler(
-                        image, z_patchtokens_permuted, output_size=(518, 518)
+                        upsample_image, z_patchtokens_permuted, output_size=(upsample_res, upsample_res)
                     )
                     z_upsampled = self.proj_grid(
                         z_upsampled, camera_angle_x, distance, mesh_scale, BHWC=False
                     )
                     z = z + z_upsampled
+                    print(f"[DinoEncoderProj] NAF upsampler successfully applied at resolution {upsample_res}x{upsample_res}")
                 except torch.OutOfMemoryError:
                     if not self.disable_upsample_on_oom:
                         raise
@@ -558,6 +576,9 @@ class DinoEncoderProj(BaseModule, ModelMixin):
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                finally:
+                    # Restore DINOv2 encoder back to GPU
+                    self.encoder.to(image.device)
 
         # Global tokens
         z_global = torch.cat([z_clstoken, z_regtokens], dim=1)
@@ -637,6 +658,8 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
         empty_embeds_ratio: float = 0.1
         grid_resolution: int = 16
         use_upsample: bool = False
+        upsample_res: int = 518
+        chunk_encoding: bool = False
 
     cfg: Config
 
@@ -683,6 +706,12 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
     def set_low_vram_mode(self, enabled: bool) -> None:
         self.low_vram = bool(enabled)
 
+    def set_upsample_res(self, res: int) -> None:
+        self.cfg.upsample_res = int(res)
+
+    def set_chunk_encoding(self, enabled: bool) -> None:
+        self.cfg.chunk_encoding = bool(enabled)
+
     def forward(
         self,
         image: torch.Tensor,
@@ -712,7 +741,14 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
         image = self.transform(image)
 
         with torch.no_grad():
-            z = self.encoder(image, is_training=True)['x_prenorm']
+            if getattr(self.cfg, "chunk_encoding", False):
+                z_list = []
+                for i in range(image.shape[0]):
+                    z_chunk = self.encoder(image[i:i+1], is_training=True)['x_prenorm']
+                    z_list.append(z_chunk)
+                z = torch.cat(z_list, dim=0)
+            else:
+                z = self.encoder(image, is_training=True)['x_prenorm']
             z = F.layer_norm(z, z.shape[-1:])
             z_clstoken = z[:, 0:1]
             z_regtokens = z[:, 1:self.encoder.num_register_tokens + 1]
@@ -739,53 +775,75 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
         z_accumulated = None
         z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2) if self.use_upsample and not self.low_vram else None
 
-        with torch.no_grad():
-            for view_idx in range(num_views):
-                indices = torch.arange(
-                    view_idx, B * num_views, num_views, device=z_patchtokens.device
-                )
+        if self.use_upsample and not self.low_vram:
+            # Offload DINOv2 encoder to CPU temporarily to save ~1.2GB VRAM
+            self.encoder.to('cpu')
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
-                # Project current view
-                z_view = self.proj_grid(
-                    z_patchtokens[indices],
-                    camera_angle_x_flat[indices],
-                    distance_flat[indices],
-                    init_mesh_scale[indices],
-                    calc_mat[indices]
-                )
-
-                # Optional: upsample
-                if self.use_upsample and not self.low_vram:
-                    try:
-                        chunk_upsampled = self.upsampler(
-                            image[indices],
-                            z_patchtokens_permuted[indices],
-                            output_size=(518, 518)
-                        )
-                        chunk_proj = self.proj_grid(
-                            chunk_upsampled,
-                            camera_angle_x_flat[indices],
-                            distance_flat[indices],
-                            init_mesh_scale[indices],
-                            calc_mat[indices],
-                            BHWC=False
-                        )
-                        z_view = z_view + chunk_proj
-                        del chunk_upsampled, chunk_proj
-                    except torch.OutOfMemoryError:
-                        if not self.disable_upsample_on_oom:
-                            raise
-                        print("[DinoEncoderProjMultiView] NAF upsampler OOM, continuing without upsample features.")
+        try:
+            with torch.no_grad():
+                for view_idx in range(num_views):
+                    indices = torch.arange(
+                        view_idx, B * num_views, num_views, device=z_patchtokens.device
+                    )
+    
+                    # Project current view
+                    z_view = self.proj_grid(
+                        z_patchtokens[indices],
+                        camera_angle_x_flat[indices],
+                        distance_flat[indices],
+                        init_mesh_scale[indices],
+                        calc_mat[indices]
+                    )
+    
+                    # Optional: upsample
+                    if self.use_upsample and not self.low_vram:
+                        upsample_res = getattr(self.cfg, "upsample_res", 518)
                         gc.collect()
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
-
-                # Accumulate
-                if z_accumulated is None:
-                    z_accumulated = z_view.clone()
-                else:
-                    z_accumulated = z_accumulated + z_view
-                del z_view
+                        try:
+                            upsample_image = image[indices]
+                            if upsample_res < 518:
+                                upsample_image = F.interpolate(upsample_image, size=(upsample_res, upsample_res), mode='bilinear', align_corners=False)
+                            if view_idx == 0:
+                                print(f"[DinoEncoderProjMultiView] Attempting NAF upsampler at resolution {upsample_res}x{upsample_res}...")
+                            chunk_upsampled = self.upsampler(
+                                upsample_image,
+                                z_patchtokens_permuted[indices],
+                                output_size=(upsample_res, upsample_res)
+                            )
+                            chunk_proj = self.proj_grid(
+                                chunk_upsampled,
+                                camera_angle_x_flat[indices],
+                                distance_flat[indices],
+                                init_mesh_scale[indices],
+                                calc_mat[indices],
+                                BHWC=False
+                            )
+                            z_view = z_view + chunk_proj
+                            del chunk_upsampled, chunk_proj
+                            if view_idx == 0:
+                                print(f"[DinoEncoderProjMultiView] NAF upsampler successfully applied at resolution {upsample_res}x{upsample_res}")
+                        except torch.OutOfMemoryError:
+                            if not self.disable_upsample_on_oom:
+                                raise
+                            print("[DinoEncoderProjMultiView] NAF upsampler OOM, continuing without upsample features.")
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+    
+                    # Accumulate
+                    if z_accumulated is None:
+                        z_accumulated = z_view.clone()
+                    else:
+                        z_accumulated = z_accumulated + z_view
+                    del z_view
+        finally:
+            if self.use_upsample and not self.low_vram:
+                # Restore DINOv2 encoder back to GPU
+                self.encoder.to(image.device)
 
         if z_patchtokens_permuted is not None:
             del z_patchtokens_permuted

@@ -468,6 +468,24 @@ class Pixal3DPipeline:
             if conditioner is not None and hasattr(conditioner, "set_low_vram_mode"):
                 conditioner.set_low_vram_mode(enabled)
 
+    def set_upsample_res(self, res: int):
+        for conditioner in (
+            self.dense_visual_condition,
+            self.sparse_512_visual_condition,
+            self.sparse_1024_visual_condition,
+        ):
+            if conditioner is not None and hasattr(conditioner, "set_upsample_res"):
+                conditioner.set_upsample_res(res)
+
+    def set_chunk_encoding(self, enabled: bool):
+        for conditioner in (
+            self.dense_visual_condition,
+            self.sparse_512_visual_condition,
+            self.sparse_1024_visual_condition,
+        ):
+            if conditioner is not None and hasattr(conditioner, "set_chunk_encoding"):
+                conditioner.set_chunk_encoding(enabled)
+
     def offload_all_models(self):
         if self.offload_models:
             self._move_all_stages(self.offload_device)
@@ -790,10 +808,24 @@ class Pixal3DPipeline:
 
         batch_size = image.shape[0]
         
+        # Offload DiT and VAE to save VRAM for the visual condition / NAF upsampler!
+        if self.dense_denoiser_model is not None:
+            self.dense_denoiser_model.to("cpu")
+        if getattr(self, "dense_vae", None) is not None:
+            self.dense_vae.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         # Encode conditions
         do_cfg = guidance_scale > 0
         image = image.to(torch.float16)
         cond, uncond = self.encode_image_dense(image, camera_angle_x, distance, mesh_scale)
+        
+        # Bring DiT and VAE back to GPU
+        if self.dense_denoiser_model is not None:
+            self.dense_denoiser_model.to(self.device)
+        if getattr(self, "dense_vae", None) is not None:
+            self.dense_vae.to(self.device)
         
         # Initialize latents
         latent_shape = (batch_size, *self.dense_denoiser_model.dit_model.latent_shape)
