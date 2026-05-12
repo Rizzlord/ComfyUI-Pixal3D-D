@@ -165,6 +165,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         moge_model_name: str = "Ruicheng/moge-vitl",
         use_dense_check: bool = True,
         load_device: str = "cpu",
+        low_vram: bool = False,
     ):
         """
         Create Pixal3D 2-Stage Pipeline.
@@ -183,6 +184,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
             use_moge: Whether to load MoGe model for FOV estimation
             moge_model_name: MoGe model name on HuggingFace
             use_dense_check: Whether to load dense_check dit from dense/scale_init
+            low_vram: Disable optional high-VRAM conditioner upsampling paths
         """
         import json
         import importlib
@@ -196,6 +198,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
             sparse_dtype=sparse_dtype,
             cache_dir=cache_dir,
             load_device=load_device,
+            low_vram=low_vram,
         )
 
         # Load MoGe model

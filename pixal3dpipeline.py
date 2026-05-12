@@ -459,6 +459,15 @@ class Pixal3DPipeline:
         gc.collect()
         torch.cuda.empty_cache()
 
+    def set_low_vram_mode(self, enabled: bool):
+        for conditioner in (
+            self.dense_visual_condition,
+            self.sparse_512_visual_condition,
+            self.sparse_1024_visual_condition,
+        ):
+            if conditioner is not None and hasattr(conditioner, "set_low_vram_mode"):
+                conditioner.set_low_vram_mode(enabled)
+
     def offload_all_models(self):
         if self.offload_models:
             self._move_all_stages(self.offload_device)
@@ -473,6 +482,7 @@ class Pixal3DPipeline:
         sparse_dtype: torch.dtype = torch.float16,
         cache_dir: str = None,
         load_device: str = "cpu",
+        low_vram: bool = False,
     ):
         """
         Create Pixal3D Pipeline from local directory or HuggingFace Hub.
@@ -483,6 +493,7 @@ class Pixal3DPipeline:
             dense_dtype: Data type for dense stage
             sparse_dtype: Data type for sparse stages
             cache_dir: Cache directory for downloaded models (default: ~/.cache/huggingface/hub)
+            low_vram: Disable optional high-VRAM conditioner upsampling paths
         
         Usage:
             # Load from local directory
@@ -659,7 +670,7 @@ class Pixal3DPipeline:
         
         print("All models loaded successfully!")
         
-        return cls(
+        pipeline = cls(
             dense_visual_condition=dense_visual_condition,
             dense_denoiser_model=dense_denoiser_model,
             dense_scheduler=dense_scheduler,
@@ -675,6 +686,8 @@ class Pixal3DPipeline:
             dense_dtype=dense_dtype,
             sparse_dtype=sparse_dtype,
         )
+        pipeline.set_low_vram_mode(low_vram)
+        return pipeline
     
     # ==================== Image Encoding ====================
     

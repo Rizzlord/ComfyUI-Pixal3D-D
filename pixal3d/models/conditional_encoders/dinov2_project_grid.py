@@ -460,6 +460,7 @@ class DinoEncoderProj(BaseModule, ModelMixin):
         self.grid_resolution = self.cfg.grid_resolution
         self.empty_embeds_ratio = self.cfg.empty_embeds_ratio
         self.use_upsample = self.cfg.use_upsample
+        self.low_vram = False
         self.disable_upsample_on_oom = True
 
         # Load DINOv2
@@ -484,6 +485,9 @@ class DinoEncoderProj(BaseModule, ModelMixin):
         self.patch_size = self.encoder.patch_size
         self.patch_number = self.cfg.size // self.patch_size
         self.proj_grid = ProjGrid(grid_resolution=self.cfg.grid_resolution)
+
+    def set_low_vram_mode(self, enabled: bool) -> None:
+        self.low_vram = bool(enabled)
 
 
      
@@ -537,7 +541,7 @@ class DinoEncoderProj(BaseModule, ModelMixin):
             )
 
             # Optional: upsample and fuse
-            if self.use_upsample:
+            if self.use_upsample and not self.low_vram:
                 z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2)
                 try:
                     z_upsampled = self.upsampler(
@@ -641,6 +645,7 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
         self.grid_resolution = self.cfg.grid_resolution
         self.empty_embeds_ratio = self.cfg.empty_embeds_ratio
         self.use_upsample = self.cfg.use_upsample
+        self.low_vram = False
         self.disable_upsample_on_oom = True
 
         # Load DINOv2
@@ -674,6 +679,9 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
             [0.0, 1.0, 0.0, 0.0],
             [0.0, 0.0, 0.0, 1.0]
         ]))
+
+    def set_low_vram_mode(self, enabled: bool) -> None:
+        self.low_vram = bool(enabled)
 
     def forward(
         self,
@@ -729,7 +737,7 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
 
         # Accumulate per-view (avoid OOM)
         z_accumulated = None
-        z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2) if self.use_upsample else None
+        z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2) if self.use_upsample and not self.low_vram else None
 
         with torch.no_grad():
             for view_idx in range(num_views):
@@ -747,7 +755,7 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
                 )
 
                 # Optional: upsample
-                if self.use_upsample:
+                if self.use_upsample and not self.low_vram:
                     try:
                         chunk_upsampled = self.upsampler(
                             image[indices],

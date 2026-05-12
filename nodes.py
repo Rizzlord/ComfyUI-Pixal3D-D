@@ -42,6 +42,7 @@ class Pixal3DLoader:
         return {
             "required": {
                 "keep_model_loaded": ("BOOLEAN", {"default": True, "tooltip": "If False, the model will be moved to CPU and VRAM cleared after generation"}),
+                "low_vram": ("BOOLEAN", {"default": False, "tooltip": "Disable the optional NAF upsampler in visual conditioning to reduce VRAM usage on 16GB GPUs"}),
             },
         }
 
@@ -50,7 +51,7 @@ class Pixal3DLoader:
     FUNCTION = "load_model"
     CATEGORY = "Pixal3D-D"
 
-    def load_model(self, keep_model_loaded):
+    def load_model(self, keep_model_loaded, low_vram):
         ckpt_path = os.path.join(folder_paths.models_dir, "pixal3d-d")
         
         if not os.path.exists(os.path.join(ckpt_path, "dense")):
@@ -60,7 +61,8 @@ class Pixal3DLoader:
         pipeline = Pixal3DPipeline2Stage.from_pretrained(
             ckpt_dir=ckpt_path,
             dense_dtype=torch.float16,
-            sparse_dtype=torch.float16
+            sparse_dtype=torch.float16,
+            low_vram=low_vram,
         )
         pipeline.keep_model_loaded = keep_model_loaded
         pipeline.enable_model_cpu_offload(device=device)
