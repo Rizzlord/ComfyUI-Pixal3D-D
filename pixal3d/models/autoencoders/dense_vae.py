@@ -396,6 +396,6 @@ class DenseShapeVAE(nn.Module):
                 method="lewiner",
             )
             vertices = vertices / voxel_resolution * 2 - 1
-            meshes.append(trimesh.Trimesh(vertices, faces))
+            meshes.append(trimesh.Trimesh(vertices=vertices, faces=faces, process=False))
 
         return meshes

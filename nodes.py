@@ -3,7 +3,6 @@ import torch
 import numpy as np
 from PIL import Image
 import trimesh
-from pathlib import Path
 import folder_paths
 import comfy.model_management as mm
 import gc
@@ -12,6 +11,30 @@ import gc
 from .pixal3dpipeline2stage import Pixal3DPipeline2Stage
 from .pixal3dpipeline import _meshlib_postprocess, preprocess_image
 from pixal3d.utils import sort_block, mesh2index, normalize_mesh
+
+
+def _mesh_counts(mesh):
+    return len(getattr(mesh, "vertices", [])), len(getattr(mesh, "faces", []))
+
+
+def _is_valid_mesh(mesh):
+    verts, faces = _mesh_counts(mesh)
+    return verts > 0 and faces > 0
+
+
+def _scale_and_center_mesh(mesh, mesh_scale, label):
+    verts = np.asarray(getattr(mesh, "vertices", []), dtype=np.float64)
+    if verts.size == 0 or not np.isfinite(verts).all():
+        print(f"{label}: mesh has non-finite vertices, skipping scale/center")
+        return mesh
+    mesh.apply_scale(0.5 / mesh_scale)
+    bounds = np.asarray(mesh.bounds, dtype=np.float64)
+    if bounds.shape == (2, 3) and np.isfinite(bounds).all():
+        mesh.vertices -= bounds.mean(axis=0)
+    else:
+        print(f"{label}: skipping centering due to non-finite bounds {bounds}")
+    return mesh
+
 
 class Pixal3DLoader:
     @classmethod
@@ -37,7 +60,7 @@ class Pixal3DLoader:
         pipeline = Pixal3DPipeline2Stage.from_pretrained(
             ckpt_dir=ckpt_path,
             dense_dtype=torch.float16,
-            sparse_dtype=torch.bfloat16
+            sparse_dtype=torch.float16
         )
         pipeline.keep_model_loaded = keep_model_loaded
         pipeline.enable_model_cpu_offload(device=device)
@@ -172,10 +195,9 @@ class Pixal3DRefineSparse:
 
         if mode_1024 == "skip":
             from pixal3d.utils import postprocess_mesh
-            mesh_v, mesh_f = postprocess_mesh(mesh_512.vertices, mesh_512.faces, simplify=True)
+            mesh_v, mesh_f = postprocess_mesh(mesh_512.vertices, mesh_512.faces, simplify=False)
             res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
-            res.apply_scale(0.5 / mesh_scale)
-            res.vertices -= res.bounds.mean(axis=0)
+            res = _scale_and_center_mesh(res, mesh_scale, "[Pixal3DRefineSparse] 512 mesh")
             if not pipeline.keep_model_loaded:
                 pipeline.unload()
                 mm.soft_empty_cache()
@@ -184,7 +206,6 @@ class Pixal3DRefineSparse:
             return (_meshlib_postprocess(res, target_face_count, remove_floaters, remove_interior),)
 
         latent_index_1024 = mesh2index(mesh_512, size=1024, factor=8).to(pipeline.device)
-        del mesh_512
         latent_index_1024 = sort_block(latent_index_1024, 8)
 
         cross_res = None
@@ -202,12 +223,37 @@ class Pixal3DRefineSparse:
         pipeline._ensure_stage("sparse1024_vae")
         with torch.autocast("cuda", dtype=torch.float16):
             decoded_mesh_1024 = pipeline.sparse_vae_1024.decode_mesh(sparse_latents_1024, voxel_resolution=1024, mc_threshold=mc_threshold)[0]
-        
-        from pixal3d.utils import postprocess_mesh
-        mesh_v, mesh_f = postprocess_mesh(decoded_mesh_1024.vertices, decoded_mesh_1024.faces, simplify=True)
-        res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
-        res.apply_scale(0.5 / mesh_scale)
-        res.vertices -= res.bounds.mean(axis=0)
+
+        if mode_1024 == "refine" and not _is_valid_mesh(decoded_mesh_1024):
+            print("[Pixal3DRefineSparse] refine mode produced an empty 1024 mesh, retrying with native 1024 conditioning.")
+            del decoded_mesh_1024, sparse_latents_1024
+            pipeline._offload_stage("sparse1024_vae")
+            gc.collect()
+            torch.cuda.empty_cache()
+            sparse_latents_1024 = pipeline.infer_sparse(
+                image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
+                sparse_1024_steps, guidance_scale, seed,
+                pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+                cross_res_cond=None
+            )
+            pipeline._offload_stage("sparse1024_dit")
+            pipeline._ensure_stage("sparse1024_vae")
+            with torch.autocast("cuda", dtype=torch.float16):
+                decoded_mesh_1024 = pipeline.sparse_vae_1024.decode_mesh(
+                    sparse_latents_1024, voxel_resolution=1024, mc_threshold=mc_threshold
+                )[0]
+
+        if _is_valid_mesh(decoded_mesh_1024):
+            from pixal3d.utils import postprocess_mesh
+            mesh_v, mesh_f = postprocess_mesh(decoded_mesh_1024.vertices, decoded_mesh_1024.faces, simplify=False)
+            res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
+            res = _scale_and_center_mesh(res, mesh_scale, "[Pixal3DRefineSparse] 1024 mesh")
+        else:
+            print("[Pixal3DRefineSparse] 1024 decode still empty after fallback, returning the 512 mesh instead.")
+            from pixal3d.utils import postprocess_mesh
+            mesh_v, mesh_f = postprocess_mesh(mesh_512.vertices, mesh_512.faces, simplify=False)
+            res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
+            res = _scale_and_center_mesh(res, mesh_scale, "[Pixal3DRefineSparse] 512 fallback mesh")
         
         if not pipeline.keep_model_loaded:
             pipeline.unload()
@@ -259,6 +305,7 @@ class Pixal3DRefineMesh:
         latent_index_1024 = mesh2index(mesh_to_refine, size=1024, factor=8).to(pipeline.device)
         latent_index_1024 = sort_block(latent_index_1024, 8)
 
+        original_mesh = mesh.copy()
         from .pixal3dpipeline import distance_from_fov
         mesh_scale = 0.95
         grid_points = torch.tensor([-1.0, 0, -1.0]) / mesh_scale / 2
@@ -283,12 +330,34 @@ class Pixal3DRefineMesh:
         pipeline._ensure_stage("sparse1024_vae")
         with torch.autocast("cuda", dtype=torch.float16):
             decoded_mesh_1024 = pipeline.sparse_vae_1024.decode_mesh(sparse_latents_1024, voxel_resolution=1024, mc_threshold=mc_threshold)[0]
-        
-        from pixal3d.utils import postprocess_mesh
-        mesh_v, mesh_f = postprocess_mesh(decoded_mesh_1024.vertices, decoded_mesh_1024.faces, simplify=True)
-        res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
-        res.apply_scale(0.5 / mesh_scale)
-        res.vertices -= res.bounds.mean(axis=0)
+
+        if mode_1024 == "refine" and not _is_valid_mesh(decoded_mesh_1024):
+            print("[Pixal3DRefineMesh] refine mode produced an empty 1024 mesh, retrying with native 1024 conditioning.")
+            del decoded_mesh_1024, sparse_latents_1024
+            pipeline._offload_stage("sparse1024_vae")
+            gc.collect()
+            torch.cuda.empty_cache()
+            sparse_latents_1024 = pipeline.infer_sparse(
+                image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
+                steps, guidance_scale, seed,
+                pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+                cross_res_cond=None
+            )
+            pipeline._offload_stage("sparse1024_dit")
+            pipeline._ensure_stage("sparse1024_vae")
+            with torch.autocast("cuda", dtype=torch.float16):
+                decoded_mesh_1024 = pipeline.sparse_vae_1024.decode_mesh(
+                    sparse_latents_1024, voxel_resolution=1024, mc_threshold=mc_threshold
+                )[0]
+
+        if _is_valid_mesh(decoded_mesh_1024):
+            from pixal3d.utils import postprocess_mesh
+            mesh_v, mesh_f = postprocess_mesh(decoded_mesh_1024.vertices, decoded_mesh_1024.faces, simplify=False)
+            res = trimesh.Trimesh(mesh_v, mesh_f, process=False)
+            res = _scale_and_center_mesh(res, mesh_scale, "[Pixal3DRefineMesh] 1024 mesh")
+        else:
+            print("[Pixal3DRefineMesh] 1024 decode still empty after fallback, returning the input mesh instead.")
+            res = original_mesh
         
         if not pipeline.keep_model_loaded:
             pipeline.unload()

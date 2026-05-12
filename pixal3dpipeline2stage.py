@@ -21,7 +21,7 @@ import trimesh
 from pixal3d.utils import postprocess_mesh, mesh2index
 from pixal3d.utils.sparse import sort_block
 
-from pixal3dpipeline import (
+from .pixal3dpipeline import (
     Pixal3DPipeline,
     preprocess_image,
     compute_f_pixels,

@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -116,14 +117,25 @@ class SparseSDFVAE(nn.Module):
         for i in range(batch_size):
             idx = sparse_index[..., 0] == i
             sparse_sdf_i, sparse_index_i = sparse_sdf[idx].squeeze(-1).cpu(),  sparse_index[idx][..., 1:].detach().cpu()
+            nonfinite_sdf = int((~torch.isfinite(sparse_sdf_i)).sum().item())
+            if nonfinite_sdf:
+                print(f"[SparseSDFVAE] non-finite sparse SDF values: {nonfinite_sdf}/{len(sparse_sdf_i)}; sanitizing to finite range")
+                sparse_sdf_i = torch.nan_to_num(sparse_sdf_i, nan=1.0, posinf=1.0, neginf=-1.0)
             sdf = torch.ones((voxel_resolution, voxel_resolution, voxel_resolution))
             sdf[sparse_index_i[..., 0], sparse_index_i[..., 1], sparse_index_i[..., 2]] = sparse_sdf_i
+            if not torch.isfinite(sdf).all():
+                print("[SparseSDFVAE] dense SDF grid still has non-finite values; sanitizing grid")
+                sdf = torch.nan_to_num(sdf, nan=1.0, posinf=1.0, neginf=-1.0)
             vertices, faces, _, _ = measure.marching_cubes(
                 sdf.numpy(),
                 mc_threshold,
                 method="lewiner",
             )
+            finite_vertices = bool(np.isfinite(vertices).all()) if len(vertices) else True
+            if not finite_vertices:
+                print("[SparseSDFVAE] marching cubes produced non-finite vertices; sanitizing vertex array")
+                vertices = np.nan_to_num(np.array(vertices, copy=True), nan=0.0, posinf=0.0, neginf=0.0)
             vertices = vertices / voxel_resolution * 2 - 1
-            meshes.append(trimesh.Trimesh(vertices, faces))
+            meshes.append(trimesh.Trimesh(vertices=vertices, faces=faces, process=False))
 
         return meshes

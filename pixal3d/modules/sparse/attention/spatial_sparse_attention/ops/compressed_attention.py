@@ -247,9 +247,7 @@ def get_block_score(
                 dim=2,
             )
             real_topk = min(topk, num_unique_blocks)
-            topk_indices = score_block_b.topk(real_topk, dim=-1).indices
-            # Map back to original flattened grid indices
-            block_topk_b = compressed_block_coords_flatten_unique_b[topk_indices].sort(-1).values
+            block_topk_b = score_block_b.topk(real_topk, dim=-1).indices.sort(-1).values
             block_topk[:, q_start: q_end, :real_topk] = block_topk_b
 
         block_coords_b = q_coords[q_start: q_end]

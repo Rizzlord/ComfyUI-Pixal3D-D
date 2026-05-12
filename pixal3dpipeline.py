@@ -17,8 +17,8 @@ import json
 from omegaconf import OmegaConf
 import torchvision.transforms.functional as TF
 from torchvision import transforms
-import pixal3d
 import sys
+import pixal3d
 from pixal3d.modules import sparse as sp
 from pixal3d.utils import postprocess_mesh, normalize_mesh, mesh2index, instantiate_from_config
 from pixal3d.utils.sparse import sort_block
@@ -28,7 +28,64 @@ import meshlib.mrmeshpy as mm
 import meshlib.mrmeshnumpy as mn
 
 
+def _mesh_debug_stats(mesh, weld_tolerance: float = 1e-4):
+    verts = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if len(verts) == 0:
+        return {
+            "verts": 0,
+            "faces": int(len(faces)),
+            "referenced_verts": 0,
+            "degenerate_faces": int(len(faces)),
+            "quantized_unique": 0,
+            "extents_max": 0.0,
+            "finite_vertices": True,
+        }
+
+    referenced = np.unique(faces.reshape(-1)) if len(faces) else np.array([], dtype=np.int64)
+    degenerate = 0
+    if len(faces):
+        degenerate = int(np.sum(
+            (faces[:, 0] == faces[:, 1]) |
+            (faces[:, 1] == faces[:, 2]) |
+            (faces[:, 0] == faces[:, 2])
+        ))
+    extents = verts.max(axis=0) - verts.min(axis=0)
+    scale = 1.0 / max(float(weld_tolerance), 1e-12)
+    quantized = np.round(verts * scale).astype(np.int64)
+    quantized_unique = int(len(np.unique(quantized, axis=0)))
+    return {
+        "verts": int(len(verts)),
+        "faces": int(len(faces)),
+        "referenced_verts": int(len(referenced)),
+        "degenerate_faces": degenerate,
+        "quantized_unique": quantized_unique,
+        "extents_max": float(np.max(np.abs(extents))) if extents.size else 0.0,
+        "finite_vertices": bool(np.isfinite(verts).all()),
+    }
+
+
+def _is_mesh_suspicious_for_unwrap(mesh, weld_tolerance: float = 1e-4) -> bool:
+    stats = _mesh_debug_stats(mesh, weld_tolerance=weld_tolerance)
+    if stats["verts"] == 0 or stats["faces"] == 0:
+        return True
+    if not stats["finite_vertices"]:
+        return True
+    if stats["referenced_verts"] <= 3:
+        return True
+    if stats["quantized_unique"] <= max(8, stats["verts"] // 100):
+        return True
+    if stats["extents_max"] <= weld_tolerance:
+        return True
+    return False
+
+
 def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True, remove_interior=True):
+    original_mesh = trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices, dtype=np.float64).copy(),
+        faces=np.asarray(mesh.faces, dtype=np.int64).copy(),
+        process=False,
+    )
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int32)
     mr_mesh = mn.meshFromFacesVerts(faces, verts)
@@ -65,7 +122,26 @@ def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True, r
     out_verts = mn.getNumpyVerts(mr_mesh)
     out_faces = mn.getNumpyFaces(mr_mesh.topology)
     print(f"[postprocess] final: {len(out_verts)} verts, {len(out_faces)} faces")
-    return trimesh.Trimesh(vertices=out_verts, faces=out_faces, process=False)
+    result = trimesh.Trimesh(vertices=out_verts, faces=out_faces, process=False)
+
+    if _is_mesh_suspicious_for_unwrap(result, weld_tolerance=1e-4):
+        print("[postprocess] meshlib output looks invalid for unwrap, falling back to PyVista decimation.")
+        fallback = original_mesh.copy()
+        current_faces = len(fallback.faces)
+        if target_face_count > 0 and current_faces > target_face_count:
+            reduction = 1.0 - (float(target_face_count) / float(current_faces))
+            reduction = min(max(reduction, 0.0), 0.995)
+            mesh_v, mesh_f = postprocess_mesh(
+                np.asarray(fallback.vertices),
+                np.asarray(fallback.faces),
+                simplify=True,
+                simplify_ratio=reduction,
+                verbose=True,
+            )
+            fallback = trimesh.Trimesh(vertices=mesh_v, faces=mesh_f, process=False)
+        return fallback
+
+    return result
 
 
 def preprocess_image(image, resolution=518, padding=20, bg="white"):
@@ -208,7 +284,7 @@ class Pixal3DPipeline:
         sparse_vae_512,
         sparse_vae_1024,
         dense_dtype: torch.dtype = torch.float16,
-        sparse_dtype: torch.dtype = torch.bfloat16,
+        sparse_dtype: torch.dtype = torch.float16,
     ):
         """
         Initialize Pixal3D Pipeline
@@ -665,8 +741,8 @@ class Pixal3DPipeline:
 
             bs = cond_sparse.shape[0]
             src_res = visual_condition.grid_resolution
-            cond_sparse = cond_sparse.reshape(bs, src_res, src_res, src_res, -1)
-            cond_volume = cond_sparse.permute(0, 4, 1, 2, 3).contiguous()
+            cond_sparse = cond_sparse.float().reshape(bs, src_res, src_res, src_res, -1)
+            cond_volume = cond_sparse.permute(0, 4, 1, 2, 3).contiguous().float()
             del cond_sparse
 
             spatial = coords[:, 1:].float()
@@ -674,14 +750,16 @@ class Pixal3DPipeline:
             spatial = spatial.flip(-1)
             grid = spatial.unsqueeze(0).unsqueeze(2).unsqueeze(2)
 
-            sampled = F.grid_sample(
-                cond_volume, grid, mode='bilinear',
-                align_corners=True, padding_mode='border'
-            )
+            with torch.amp.autocast("cuda", enabled=False):
+                sampled = F.grid_sample(
+                    cond_volume, grid.float(), mode='bilinear',
+                    align_corners=True, padding_mode='border'
+                )
             del cond_volume
 
             cond_sparse_out = sampled.squeeze(-1).squeeze(-1).permute(0, 2, 1)
             cond_sparse_out = cond_sparse_out.squeeze(0)
+            cond_sparse_out = cond_sparse_out.to(cond_global.dtype)
             del sampled
 
             uncond_global = torch.zeros_like(cond_global)
@@ -799,7 +877,16 @@ class Pixal3DPipeline:
                 else:
                     noise_pred = noise_pred_cond
 
+            if not torch.isfinite(noise_pred).all():
+                bad = int((~torch.isfinite(noise_pred)).sum().item())
+                print(f"[infer_sparse] non-finite noise prediction at step {i+1}/{len(timesteps)}: {bad}/{noise_pred.numel()}; sanitizing")
+                noise_pred = torch.nan_to_num(noise_pred, nan=0.0, posinf=1e4, neginf=-1e4)
+
             latents = scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+            if not torch.isfinite(latents).all():
+                bad = int((~torch.isfinite(latents)).sum().item())
+                print(f"[infer_sparse] non-finite latents at step {i+1}/{len(timesteps)}: {bad}/{latents.numel()}; sanitizing")
+                latents = torch.nan_to_num(latents, nan=0.0, posinf=1e4, neginf=-1e4)
         return sp.SparseTensor(latents, index.int())
     
     # ==================== Main Inference Interface ====================

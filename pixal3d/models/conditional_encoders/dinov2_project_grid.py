@@ -4,6 +4,7 @@ Includes single-view and multi-view DINOv2 encoders with 3D grid projection supp
 """
 
 import random
+import gc
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Union
 
@@ -459,6 +460,7 @@ class DinoEncoderProj(BaseModule, ModelMixin):
         self.grid_resolution = self.cfg.grid_resolution
         self.empty_embeds_ratio = self.cfg.empty_embeds_ratio
         self.use_upsample = self.cfg.use_upsample
+        self.disable_upsample_on_oom = True
 
         # Load DINOv2
         dino_model = torch.hub.load(
@@ -537,13 +539,21 @@ class DinoEncoderProj(BaseModule, ModelMixin):
             # Optional: upsample and fuse
             if self.use_upsample:
                 z_patchtokens_permuted = z_patchtokens.permute(0, 3, 1, 2)
-                z_upsampled = self.upsampler(
-                    image, z_patchtokens_permuted, output_size=(518, 518)
-                )
-                z_upsampled = self.proj_grid(
-                    z_upsampled, camera_angle_x, distance, mesh_scale, BHWC=False
-                )
-                z = z + z_upsampled
+                try:
+                    z_upsampled = self.upsampler(
+                        image, z_patchtokens_permuted, output_size=(518, 518)
+                    )
+                    z_upsampled = self.proj_grid(
+                        z_upsampled, camera_angle_x, distance, mesh_scale, BHWC=False
+                    )
+                    z = z + z_upsampled
+                except torch.OutOfMemoryError:
+                    if not self.disable_upsample_on_oom:
+                        raise
+                    print("[DinoEncoderProj] NAF upsampler OOM, continuing without upsample features.")
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
         # Global tokens
         z_global = torch.cat([z_clstoken, z_regtokens], dim=1)
@@ -631,6 +641,7 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
         self.grid_resolution = self.cfg.grid_resolution
         self.empty_embeds_ratio = self.cfg.empty_embeds_ratio
         self.use_upsample = self.cfg.use_upsample
+        self.disable_upsample_on_oom = True
 
         # Load DINOv2
         dino_model = torch.hub.load(
@@ -737,21 +748,29 @@ class DinoEncoderProjMultiView(BaseModule, ModelMixin):
 
                 # Optional: upsample
                 if self.use_upsample:
-                    chunk_upsampled = self.upsampler(
-                        image[indices],
-                        z_patchtokens_permuted[indices],
-                        output_size=(518, 518)
-                    )
-                    chunk_proj = self.proj_grid(
-                        chunk_upsampled,
-                        camera_angle_x_flat[indices],
-                        distance_flat[indices],
-                        init_mesh_scale[indices],
-                        calc_mat[indices],
-                        BHWC=False
-                    )
-                    z_view = z_view + chunk_proj
-                    del chunk_upsampled, chunk_proj
+                    try:
+                        chunk_upsampled = self.upsampler(
+                            image[indices],
+                            z_patchtokens_permuted[indices],
+                            output_size=(518, 518)
+                        )
+                        chunk_proj = self.proj_grid(
+                            chunk_upsampled,
+                            camera_angle_x_flat[indices],
+                            distance_flat[indices],
+                            init_mesh_scale[indices],
+                            calc_mat[indices],
+                            BHWC=False
+                        )
+                        z_view = z_view + chunk_proj
+                        del chunk_upsampled, chunk_proj
+                    except torch.OutOfMemoryError:
+                        if not self.disable_upsample_on_oom:
+                            raise
+                        print("[DinoEncoderProjMultiView] NAF upsampler OOM, continuing without upsample features.")
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
                 # Accumulate
                 if z_accumulated is None:
