@@ -89,40 +89,34 @@ def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True, r
     verts = np.asarray(mesh.vertices, dtype=np.float64)
     faces = np.asarray(mesh.faces, dtype=np.int32)
     mr_mesh = mn.meshFromFacesVerts(faces, verts)
+    del verts, faces
 
     if remove_floaters or remove_interior:
         comps = mm.getAllComponents(mr_mesh)
         if len(comps) > 1:
-            if remove_interior and not remove_floaters:
-                # If only removing interior, we keep all components that are NOT fully enclosed
-                # For simplicity in 3D generation, usually keeping the largest is preferred
-                # but if the user wants separate control:
-                largest = max(comps, key=lambda c: c.count())
-                to_del = mm.FaceBitSet(largest)
-                to_del.flip()
-                mr_mesh.deleteFaces(to_del)
-                print(f"[postprocess] removed {len(comps)-1} internal/floater components")
-            else:
-                # remove_floaters is True: just keep the largest component
-                largest = max(comps, key=lambda c: c.count())
-                to_del = mm.FaceBitSet(largest)
-                to_del.flip()
-                mr_mesh.deleteFaces(to_del)
-                print(f"[postprocess] removed {len(comps)-1} floater components")
-        
+            largest = max(comps, key=lambda c: c.count())
+            to_del = mm.FaceBitSet(largest)
+            to_del.flip()
+            mr_mesh.deleteFaces(to_del)
+            del to_del
+            print(f"[postprocess] removed {len(comps)-1} components")
+        del comps
         mr_mesh.invalidateCaches()
 
     if target_face_count > 0 and mr_mesh.topology.numValidFaces() > target_face_count:
         settings = mm.DecimateSettings()
         settings.maxDeletedFaces = mr_mesh.topology.numValidFaces() - target_face_count
         settings.packMesh = True
-        result = mm.decimateMesh(mr_mesh, settings)
-        print(f"[postprocess] decimated: {result.vertsDeleted} verts, {result.facesDeleted} faces removed")
+        result_dec = mm.decimateMesh(mr_mesh, settings)
+        del settings, result_dec
+        print(f"[postprocess] decimated mesh to target {target_face_count}")
 
     out_verts = mn.getNumpyVerts(mr_mesh)
     out_faces = mn.getNumpyFaces(mr_mesh.topology)
+    del mr_mesh
     print(f"[postprocess] final: {len(out_verts)} verts, {len(out_faces)} faces")
     result = trimesh.Trimesh(vertices=out_verts, faces=out_faces, process=False)
+    del out_verts, out_faces
 
     if _is_mesh_suspicious_for_unwrap(result, weld_tolerance=1e-4):
         print("[postprocess] meshlib output looks invalid for unwrap, falling back to PyVista decimation.")
@@ -139,8 +133,13 @@ def _meshlib_postprocess(mesh, target_face_count=200000, remove_floaters=True, r
                 verbose=True,
             )
             fallback = trimesh.Trimesh(vertices=mesh_v, faces=mesh_f, process=False)
+            del mesh_v, mesh_f
+        del original_mesh, result
+        gc.collect()
         return fallback
 
+    del original_mesh
+    gc.collect()
     return result
 
 
