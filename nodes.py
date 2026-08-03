@@ -84,7 +84,7 @@ class Pixal3DGenerateDense:
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffff, "tooltip": "Random seed for generation"}),
                 "mesh_scale": ("FLOAT", {"default": 0.5, "min": 0.1, "max": 1.0, "tooltip": "Initial mesh scale factor"}),
                 "optimize_mesh_scale": ("BOOLEAN", {"default": True, "tooltip": "Automatically adjust mesh scale to fit the grid perfectly"}),
-                "dense_threshold": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "tooltip": "Marching cubes threshold for the dense stage"}),
+                "dense_threshold": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Marching cubes threshold for the dense stage"}),
             },
         }
 
@@ -156,7 +156,7 @@ class Pixal3DRefineSparse:
                 "sparse_512_steps": ("INT", {"default": 30, "min": 1, "max": 200, "tooltip": "Steps for the 512 sparse refinement stage"}),
                 "sparse_1024_steps": ("INT", {"default": 15, "min": 1, "max": 200, "tooltip": "Steps for the 1024 sparse refinement stage"}),
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "tooltip": "Classifier-free guidance scale"}),
-                "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "tooltip": "Marching cubes threshold for final mesh extraction"}),
+                "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Marching cubes threshold for final mesh extraction"}),
                 "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 5000000, "tooltip": "Target number of faces for decimation (0 to skip)"}),
                 "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
                 "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal shells and fully enclosed geometry"}),
@@ -282,7 +282,7 @@ class Pixal3DRefineMesh:
                 "mode_1024": (["refine", "full"], {"default": "refine", "tooltip": "'refine' is optimized for 16GB VRAM"}),
                 "steps": ("INT", {"default": 15, "min": 1, "max": 200, "tooltip": "Refinement steps"}),
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0}),
-                "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
+                "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 5000000}),
                 "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
                 "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal geometry using meshlib"}),
