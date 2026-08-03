@@ -157,7 +157,7 @@ class Pixal3DRefineSparse:
                 "sparse_1024_steps": ("INT", {"default": 15, "min": 1, "max": 200, "tooltip": "Steps for the 1024 sparse refinement stage"}),
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0, "tooltip": "Classifier-free guidance scale"}),
                 "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "tooltip": "Marching cubes threshold for final mesh extraction"}),
-                "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 1000000, "tooltip": "Target number of faces for decimation (0 to skip)"}),
+                "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 5000000, "tooltip": "Target number of faces for decimation (0 to skip)"}),
                 "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
                 "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal shells and fully enclosed geometry"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffff}),
@@ -216,12 +216,14 @@ class Pixal3DRefineSparse:
 
         cross_res = None
         if mode_1024 == "refine":
-            cross_res = (pipeline.sparse_512_visual_condition, "sparse512_cond", 128)
+            cross_res = (pipeline.sparse_512_visual_condition or pipeline.dense_visual_condition, "sparse512_cond", 128)
+
+        vis_1024 = pipeline.sparse_1024_visual_condition or pipeline.sparse_512_visual_condition or pipeline.dense_visual_condition
 
         sparse_latents_1024 = pipeline.infer_sparse(
             image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
             sparse_1024_steps, guidance_scale, seed,
-            pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+            vis_1024, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
             cross_res_cond=cross_res
         )
 
@@ -236,11 +238,12 @@ class Pixal3DRefineSparse:
             pipeline._offload_stage("sparse1024_vae")
             gc.collect()
             torch.cuda.empty_cache()
+            fb_cross_res = cross_res if pipeline.sparse_1024_visual_condition is None else None
             sparse_latents_1024 = pipeline.infer_sparse(
                 image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
                 sparse_1024_steps, guidance_scale, seed,
-                pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
-                cross_res_cond=None
+                vis_1024, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+                cross_res_cond=fb_cross_res
             )
             pipeline._offload_stage("sparse1024_dit")
             pipeline._ensure_stage("sparse1024_vae")
@@ -280,7 +283,7 @@ class Pixal3DRefineMesh:
                 "steps": ("INT", {"default": 15, "min": 1, "max": 200, "tooltip": "Refinement steps"}),
                 "guidance_scale": ("FLOAT", {"default": 7.0, "min": 1.0, "max": 20.0}),
                 "mc_threshold": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0}),
-                "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 1000000}),
+                "target_face_count": ("INT", {"default": 200000, "min": 0, "max": 5000000}),
                 "remove_floaters": ("BOOLEAN", {"default": True, "tooltip": "Remove disconnected small components (floaters)"}),
                 "remove_interior": ("BOOLEAN", {"default": True, "tooltip": "Remove internal geometry using meshlib"}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffff}),
@@ -323,12 +326,14 @@ class Pixal3DRefineMesh:
 
         cross_res = None
         if mode_1024 == "refine":
-            cross_res = (pipeline.sparse_512_visual_condition, "sparse512_cond", 128)
+            cross_res = (pipeline.sparse_512_visual_condition or pipeline.dense_visual_condition, "sparse512_cond", 128)
+
+        vis_1024 = pipeline.sparse_1024_visual_condition or pipeline.sparse_512_visual_condition or pipeline.dense_visual_condition
 
         sparse_latents_1024 = pipeline.infer_sparse(
             image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
             steps, guidance_scale, seed,
-            pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+            vis_1024, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
             cross_res_cond=cross_res
         )
 
@@ -343,11 +348,12 @@ class Pixal3DRefineMesh:
             pipeline._offload_stage("sparse1024_vae")
             gc.collect()
             torch.cuda.empty_cache()
+            fb_cross_res = cross_res if pipeline.sparse_1024_visual_condition is None else None
             sparse_latents_1024 = pipeline.infer_sparse(
                 image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor, latent_index_1024,
                 steps, guidance_scale, seed,
-                pipeline.sparse_1024_visual_condition, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
-                cross_res_cond=None
+                vis_1024, pipeline.sparse_1024_denoiser_model, pipeline.sparse_1024_scheduler,
+                cross_res_cond=fb_cross_res
             )
             pipeline._offload_stage("sparse1024_dit")
             pipeline._ensure_stage("sparse1024_vae")

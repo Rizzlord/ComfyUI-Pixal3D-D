@@ -333,30 +333,36 @@ class Pixal3DPipeline:
         self._set_eval_mode()
         
     def _set_eval_mode(self):
-        """Set all models to evaluation mode"""
-        self.dense_visual_condition.eval()
-        self.dense_denoiser_model.eval()
-        self.sparse_512_visual_condition.eval()
-        self.sparse_512_denoiser_model.eval()
-        self.sparse_1024_visual_condition.eval()
-        self.sparse_1024_denoiser_model.eval()
-        self.dense_vae.eval()
-        self.sparse_vae_512.eval()
-        self.sparse_vae_1024.eval()
+        for m in [
+            self.dense_visual_condition,
+            self.dense_denoiser_model,
+            self.sparse_512_visual_condition,
+            self.sparse_512_denoiser_model,
+            self.sparse_1024_visual_condition,
+            self.sparse_1024_denoiser_model,
+            self.dense_vae,
+            self.sparse_vae_512,
+            self.sparse_vae_1024,
+        ]:
+            if m is not None:
+                m.eval()
         
     def to(self, device):
-        """Move all models to specified device"""
         self.device = device
         self.offload_models = False
-        self.dense_visual_condition.to(device)
-        self.dense_denoiser_model.to(device)
-        self.sparse_512_visual_condition.to(device)
-        self.sparse_512_denoiser_model.to(device)
-        self.sparse_1024_visual_condition.to(device)
-        self.sparse_1024_denoiser_model.to(device)
-        self.dense_vae.to(device)
-        self.sparse_vae_512.to(device)
-        self.sparse_vae_1024.to(device)
+        for m in [
+            self.dense_visual_condition,
+            self.dense_denoiser_model,
+            self.sparse_512_visual_condition,
+            self.sparse_512_denoiser_model,
+            self.sparse_1024_visual_condition,
+            self.sparse_1024_denoiser_model,
+            self.dense_vae,
+            self.sparse_vae_512,
+            self.sparse_vae_1024,
+        ]:
+            if m is not None:
+                m.to(device)
         return self
 
     def _stage_module_names(self):
@@ -445,19 +451,11 @@ class Pixal3DPipeline:
         self._flush_cuda()
 
     def unload(self):
-        """Delete all models and clear VRAM/RAM"""
-        self.dense_vae = None
-        self.dense_denoiser_model = None
-        self.dense_visual_condition = None
-        self.sparse_vae_512 = None
-        self.sparse_512_denoiser_model = None
-        self.sparse_512_visual_condition = None
-        self.sparse_vae_1024 = None
-        self.sparse_1024_denoiser_model = None
-        self.sparse_1024_visual_condition = None
-        
+        self._move_all_stages(getattr(self, "offload_device", "cpu"))
+        self._active_stage = None
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def set_low_vram_mode(self, enabled: bool):
         for conditioner in (
@@ -726,7 +724,9 @@ class Pixal3DPipeline:
         
         return (cond_global, cond_proj), (uncond_global, uncond_proj)
     
-    def encode_image_sparse(self, image, camera_angle_x, distance, mesh_scale, coords, visual_condition):
+    def encode_image_sparse(self, image, camera_angle_x, distance, mesh_scale, coords, visual_condition=None):
+        if visual_condition is None:
+            visual_condition = self.sparse_1024_visual_condition or self.sparse_512_visual_condition or self.dense_visual_condition
 
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=self.sparse_dtype):
@@ -760,7 +760,9 @@ class Pixal3DPipeline:
         return (cond_global, cond_sparse), (uncond_global, uncond_sparse)
 
     def encode_image_sparse_cross_res(self, image, camera_angle_x, distance, mesh_scale,
-                                       coords, visual_condition, target_grid_resolution):
+                                       coords, visual_condition=None, target_grid_resolution=128):
+        if visual_condition is None:
+            visual_condition = self.sparse_512_visual_condition or self.dense_visual_condition
         with torch.no_grad():
             with torch.cuda.amp.autocast(dtype=self.sparse_dtype):
                 cond_global, cond_sparse = visual_condition(
@@ -861,6 +863,9 @@ class Pixal3DPipeline:
     @torch.no_grad()
     def infer_sparse(self, image, camera_angle_x, distance, mesh_scale, index, num_steps, guidance_scale, seed, 
                      visual_condition, denoiser_model, scheduler, cross_res_cond=None):
+        if visual_condition is None:
+            visual_condition = self.sparse_1024_visual_condition or self.sparse_512_visual_condition or self.dense_visual_condition
+
         if denoiser_model is self.sparse_512_denoiser_model:
             cond_stage = "sparse512_cond"
             dit_stage = "sparse512_dit"
@@ -874,17 +879,19 @@ class Pixal3DPipeline:
         do_cfg = guidance_scale > 0
         if cross_res_cond is not None:
             src_cond, src_cond_stage, target_grid_res = cross_res_cond
+            if src_cond is None:
+                src_cond = self.sparse_512_visual_condition or self.dense_visual_condition
             self._ensure_stage(src_cond_stage)
             cond, uncond = self.encode_image_sparse_cross_res(
                 image, camera_angle_x, distance, mesh_scale, index, src_cond, target_grid_res
             )
             self._offload_stage(src_cond_stage)
         else:
-            if cond_stage:
+            if cond_stage and (visual_condition is self.sparse_1024_visual_condition or visual_condition is self.sparse_512_visual_condition):
                 self._ensure_stage(cond_stage)
             batch_size = image.shape[0]
             cond, uncond = self.encode_image_sparse(image, camera_angle_x, distance, mesh_scale, index, visual_condition)
-            if cond_stage:
+            if cond_stage and (visual_condition is self.sparse_1024_visual_condition or visual_condition is self.sparse_512_visual_condition):
                 self._offload_stage(cond_stage)
 
         if dit_stage:
