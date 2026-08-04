@@ -379,7 +379,11 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
                     noise_pred = noise_pred_cond
 
             latents = self.dense_check_scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+            del timestep_tensor, diffusion_inputs, noise_pred_cond
+            if do_cfg:
+                del noise_pred_uncond, noise_pred
 
+        gc.collect()
         return latents
 
     def _optimize_mesh_scale(
@@ -397,15 +401,6 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         padding_tolerance_max: int = 4,
         max_iterations: int = 2,
     ) -> tuple:
-        """
-        Iteratively optimize mesh_scale so decoded dense indices stay within grid boundaries.
-
-        Uses the dense_check model (if available) for the optimization loop,
-        then the main dense model is used for final inference in infer().
-
-        Returns:
-            optimized_mesh_scale (float)
-        """
         current_mesh_scale = initial_mesh_scale
         best_mesh_scale = initial_mesh_scale
 
@@ -413,7 +408,6 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         check_label = "dense_check" if use_check else "dense"
         print(f"[mesh_scale optim] Using {check_label} model for optimization")
 
-        # Initial dense inference with check model
         mesh_scale_tensor = torch.tensor([current_mesh_scale], device=self.device, dtype=torch.float32)
         dense_latents = self._infer_dense_check(
             image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor,
@@ -423,6 +417,7 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
             decoded_index = self.dense_vae.decode_mesh(
                 dense_latents, mc_threshold=dense_threshold, return_index=True
             )[0]
+        del dense_latents
         decoded_index = sort_block(decoded_index, 8)
 
         for iteration in range(max_iterations):
@@ -435,7 +430,6 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
                 padding=target_padding,
             )
 
-            # Re-run dense inference with optimized mesh_scale (using check model)
             mesh_scale_tensor = torch.tensor([optimal_mesh_scale], device=self.device, dtype=torch.float32)
             dense_latents = self._infer_dense_check(
                 image_tensor, camera_angle_x_tensor, distance_tensor, mesh_scale_tensor,
@@ -445,9 +439,9 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
                 opt_decoded_index = self.dense_vae.decode_mesh(
                     dense_latents, mc_threshold=dense_threshold, return_index=True
                 )[0]
+            del dense_latents
             opt_decoded_index = sort_block(opt_decoded_index, 8)
 
-            # Check boundary
             xyz_index = opt_decoded_index[:, 1:4]
             min_padding = xyz_index.min(dim=0).values.min().item()
             max_padding = 63 - xyz_index.max(dim=0).values.max().item()
@@ -470,6 +464,8 @@ class Pixal3DPipeline2Stage(Pixal3DPipeline):
         else:
             print(f"[mesh_scale optim] Reached max iterations {max_iterations}, using best result")
 
+        gc.collect()
+        torch.cuda.empty_cache()
         return best_mesh_scale
 
     @torch.no_grad()

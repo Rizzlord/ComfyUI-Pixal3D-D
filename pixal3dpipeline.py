@@ -856,7 +856,11 @@ class Pixal3DPipeline:
                     noise_pred = noise_pred_cond
             
             latents = self.dense_scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+            del timestep_tensor, diffusion_inputs, noise_pred_cond
+            if do_cfg:
+                del noise_pred_uncond, noise_pred
         
+        gc.collect()
         return latents
     
     @torch.no_grad()
@@ -938,6 +942,13 @@ class Pixal3DPipeline:
                 bad = int((~torch.isfinite(latents)).sum().item())
                 print(f"[infer_sparse] non-finite latents at step {i+1}/{len(timesteps)}: {bad}/{latents.numel()}; sanitizing")
                 latents = torch.nan_to_num(latents, nan=0.0, posinf=1e4, neginf=-1e4)
+            
+            del x_input, diffusion_inputs, timestep_tensor
+            if do_cfg:
+                del noise_pred_uncond
+            del noise_pred_cond, noise_pred
+
+        gc.collect()
         return sp.SparseTensor(latents, index.int())
     
     # ==================== Main Inference Interface ====================
